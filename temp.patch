@@ -1,0 +1,324 @@
+diff --git a/python_package/examples/tests/brainflow_get_data.py b/python_package/examples/tests/brainflow_get_data.py
+index c34e82a8..95b0dd02 100644
+--- a/python_package/examples/tests/brainflow_get_data.py
++++ b/python_package/examples/tests/brainflow_get_data.py
+@@ -39,6 +39,7 @@ def main():
+     params.master_board = args.master_board
+ 
+     board = BoardShim(args.board_id, params)
++    input()
+     board.prepare_session()
+     board.start_stream ()
+     time.sleep(10)
+diff --git a/src/board_controller/brainflow_boards.cpp b/src/board_controller/brainflow_boards.cpp
+index c1aef65b..c150b14c 100644
+--- a/src/board_controller/brainflow_boards.cpp
++++ b/src/board_controller/brainflow_boards.cpp
+@@ -333,9 +333,11 @@ BrainFlowBoards::BrainFlowBoards()
+         {"name", "GforcePro"},
+         {"sampling_rate", 500},
+         {"package_num_channel", 0},
+-        {"timestamp_channel", 9},
+-        {"marker_channel", 10},
++        {"timestamp_channel", 15},
++        {"marker_channel", 16},
+-        {"num_rows", 11},
++        {"num_rows", 17},
++        {"accel_channels", {9, 10, 11}},
++        {"gyro_channels", {12, 13, 14}},
+         {"emg_channels", {1, 2, 3, 4, 5, 6, 7, 8}}
+     };
+     brainflow_boards_json["boards"]["17"]["default"] =
+@@ -366,10 +368,12 @@ BrainFlowBoards::BrainFlowBoards()
+     {
+         {"name", "GforceDual"},
+         {"sampling_rate", 500},
+-        {"timestamp_channel", 3},
+-        {"marker_channel", 4},
++        {"timestamp_channel", 9},
++        {"marker_channel", 10},
+         {"package_num_channel", 0},
+         {"num_rows", 5},
++        {"accel_channels", {3, 4, 5}},
++        {"gyro_channels", {6, 7, 8}},
+         {"emg_channels", {1, 2}}
+     };
+     brainflow_boards_json["boards"]["20"]["default"] =
+diff --git a/third_party/gForceSDKCXX/src/inc/gforce_handle.h b/third_party/gForceSDKCXX/src/inc/gforce_handle.h
+index 9ea411dd..e5fdbb68 100644
+--- a/third_party/gForceSDKCXX/src/inc/gforce_handle.h
++++ b/third_party/gForceSDKCXX/src/inc/gforce_handle.h
+@@ -12,7 +12,7 @@
+ #include "spinlock.h"
+ #include "timestamp.h"
+ 
+-//#define ENABLE_LOGGER
++#define ENABLE_LOGGER
+ 
+ using namespace gf;
+ using namespace std;
+@@ -39,6 +39,11 @@ public:
+         bIsFeatureMapConfigured = false;
+         iCounter = 0;
+         this->iBoardType = iBoardType;
++        for (int i = 0; i < 3; i++)
++        {
++            accel[i] = 0.0;
++            gyro[i] = 0.0;
++        }
+         if (iBoardType == (int)BoardIds::GFORCE_PRO_BOARD)
+         {
+             iSamplingRate = 500;
+@@ -142,7 +147,7 @@ public:
+     virtual void onOrientationData (SPDEVICE device, const Quaternion &rotation) override
+     {
+         // dont use this data
+-        logger->info ("onOrientationData");
++        logger->info ("onOrientationData: {}", rotation.toString ().c_str ());
+     }
+ 
+     /// This callback is called when the gesture data is recevied
+@@ -163,73 +168,113 @@ public:
+     virtual void onExtendedDeviceData (
+         SPDEVICE device, DeviceDataType dataType, gfsPtr<const std::vector<GF_UINT8>> data) override
+     {
+-        double timestamp = get_timestamp ();
+-        if (bShouldStopStream)
+-        {
+-            logger->trace ("data received but acqusition is off.");
+-            return;
+-        }
+-        if (!bIsEMGConfigured)
+-        {
+-            logger->trace ("EMG is not configured.");
+-            return;
+-        }
+-        if (!bIsFeatureMapConfigured)
++        auto ptr = data->data ();
++        double timestamp = 0.0;
++        switch (dataType)
+         {
+-            logger->trace ("featureMap is not configured.");
+-            return;
+-        }
++            // not sure in 65536 for both accel ad gyro data
++            case DeviceDataType::DDT_ACCELERATE:
++                accel[0] = *(reinterpret_cast<const long *> (ptr)) / 65536.0;
++                accel[1] = *(reinterpret_cast<const long *> (ptr + 4)) / 65536.0;
++                accel[2] = *(reinterpret_cast<const long *> (ptr + 8)) / 65536.0;
++                logger->trace ("accel");
++                break;
++            case DeviceDataType::DDT_GYROSCOPE:
++                gyro[0] = *(reinterpret_cast<const long *> (ptr)) / 65536.0;
++                gyro[1] = *(reinterpret_cast<const long *> (ptr + 4)) / 65536.0;
++                gyro[2] = *(reinterpret_cast<const long *> (ptr + 8)) / 65536.0;
++                logger->trace ("gyro");
++                break;
++            case DeviceDataType::DDT_EMGRAW:
++                logger->trace ("raw");
++                timestamp = get_timestamp ();
++                if (bShouldStopStream)
++                {
++                    logger->trace ("data received but acqusition is off.");
++                    return;
++                }
++                if (!bIsEMGConfigured)
++                {
++                    logger->trace ("EMG is not configured.");
++                    return;
++                }
++                if (!bIsFeatureMapConfigured)
++                {
++                    logger->trace ("featureMap is not configured.");
++                    return;
++                }
+ 
+-        if (data->size () != GforceHandle::iTransactionSize)
+-        {
+-            return;
+-        }
++                if (data->size () != GforceHandle::iTransactionSize)
++                {
++                    logger->trace ("invalid{} ", data->size ());
++                    return;
++                }
++                else
++                {
++                    logger->trace ("valid{} ", data->size ());
++                }
+ 
+-        auto ptr = data->data ();
+-        if (iBoardType == (int)BoardIds::GFORCE_PRO_BOARD)
+-        {
+-            constexpr int size = 11;
+-            double emgData[size] = {0.0};
+-            if (dataType == DeviceDataType::DDT_EMGRAW)
+-            {
+-                for (int packageNum = 0; packageNum < iNumPackages; packageNum++)
++                if (iBoardType == (int)BoardIds::GFORCE_PRO_BOARD)
+                 {
+-                    emgData[0] = iCounter++;
+-                    for (int i = 0; i < 8; i++)
++                    constexpr int size = 17;
++                    double emgData[size] = {0.0};
++                    if (dataType == DeviceDataType::DDT_EMGRAW)
+                     {
+-                        emgData[i + 1] = (double)*(reinterpret_cast<const uint16_t *> (ptr));
+-                        ptr += 2;
++                        for (int packageNum = 0; packageNum < iNumPackages; packageNum++)
++                        {
++                            emgData[0] = iCounter++;
++                            for (int i = 0; i < 8; i++)
++                            {
++                                emgData[i + 1] =
++                                    (double)*(reinterpret_cast<const uint16_t *> (ptr));
++                                ptr += 2;
++                            }
++                            for (int i = 0; i < 3; i++)
++                            {
++                                emgData[9 + i] = accel[i];
++                                emgData[12 + i] = gyro[i];
++                            }
++                            emgData[15] = timestamp;
++                            BrainFlowArray<double, 1> gforceData (emgData, size);
++                            spinLock.lock ();
++                            logger->trace ("pushed");
++                            dataQueue.push_back (std::move (gforceData));
++                            spinLock.unlock ();
++                        }
+                     }
+-                    emgData[9] = timestamp;
+-                    BrainFlowArray<double, 1> gforceData (emgData, size);
+-                    spinLock.lock ();
+-                    dataQueue.push_back (std::move (gforceData));
+-                    spinLock.unlock ();
+                 }
+-            }
+-        }
+-        if (iBoardType == (int)BoardIds::GFORCE_DUAL_BOARD)
+-        {
+-            constexpr int size = 5;
+-            double emgData[size] = {0.0};
+-            if (dataType == DeviceDataType::DDT_EMGRAW)
+-            {
+-                emgData[0] = iCounter++;
+-                for (int packageNum = 0; packageNum < iNumPackages; packageNum++)
++                if (iBoardType == (int)BoardIds::GFORCE_DUAL_BOARD)
+                 {
+-                    emgData[0] = iCounter++;
+-                    for (int i = 0; i < 2; i++)
++                    constexpr int size = 11;
++                    double emgData[size] = {0.0};
++                    if (dataType == DeviceDataType::DDT_EMGRAW)
+                     {
+-                        emgData[i + 1] = (double)*(reinterpret_cast<const uint16_t *> (ptr));
+-                        ptr += 2;
++                        emgData[0] = iCounter++;
++                        for (int packageNum = 0; packageNum < iNumPackages; packageNum++)
++                        {
++                            emgData[0] = iCounter++;
++                            for (int i = 0; i < 2; i++)
++                            {
++                                emgData[i + 1] =
++                                    (double)*(reinterpret_cast<const uint16_t *> (ptr));
++                                ptr += 2;
++                            }
++                            for (int i = 0; i < 3; i++)
++                            {
++                                emgData[3 + i] = accel[i];
++                                emgData[6 + i] = gyro[i];
++                            }
++                            emgData[9] = timestamp;
++                            BrainFlowArray<double, 1> gforceData (emgData, size);
++                            spinLock.lock ();
++                            dataQueue.push_back (std::move (gforceData));
++                            spinLock.unlock ();
++                        }
+                     }
+-                    emgData[3] = timestamp;
+-                    BrainFlowArray<double, 1> gforceData (emgData, size);
+-                    spinLock.lock ();
+-                    dataQueue.push_back (std::move (gforceData));
+-                    spinLock.unlock ();
+                 }
+-            }
++                break;
++            default:
++                break;
+         }
+     }
+ 
+@@ -242,6 +287,9 @@ public:
+     int iNumPackages;
+     int iChannelMap;
+ 
++    double accel[3];
++    double gyro[3];
++
+     static const int iADCResolution = 12;
+ 
+ private:
+@@ -253,19 +301,18 @@ private:
+     {
+         featureMap >>= 6; // Convert feature map to notification flags
+ 
+-        DeviceSetting::DataNotifFlags flags =
+-            (DeviceSetting::DataNotifFlags) (DeviceSetting::DNF_OFF
+-                //| DeviceSetting::DNF_ACCELERATE
+-                //| DeviceSetting::DNF_GYROSCOPE
+-                //| DeviceSetting::DNF_MAGNETOMETER
+-                //| DeviceSetting::DNF_EULERANGLE
+-                //| DeviceSetting::DNF_QUATERNION
+-                //| DeviceSetting::DNF_ROTATIONMATRIX
+-                //| DeviceSetting::DNF_EMG_GESTURE
+-                | DeviceSetting::DNF_EMG_RAW
+-                //| DeviceSetting::DNF_HID_MOUSE
+-                //| DeviceSetting::DNF_HID_JOYSTICK
+-                | DeviceSetting::DNF_DEVICE_STATUS);
++        DeviceSetting::DataNotifFlags flags = (DeviceSetting::DataNotifFlags) (
++            DeviceSetting::DNF_OFF | DeviceSetting::DNF_ACCELERATE |
++            DeviceSetting::DNF_GYROSCOPE
++            //| DeviceSetting::DNF_MAGNETOMETER
++            //| DeviceSetting::DNF_EULERANGLE
++            //| DeviceSetting::DNF_QUATERNION
++            //| DeviceSetting::DNF_ROTATIONMATRIX
++            //| DeviceSetting::DNF_EMG_GESTURE
++            | DeviceSetting::DNF_EMG_RAW
++            //| DeviceSetting::DNF_HID_MOUSE
++            //| DeviceSetting::DNF_HID_JOYSTICK
++            | DeviceSetting::DNF_DEVICE_STATUS);
+ 
+         flags = (DeviceSetting::DataNotifFlags) (flags & featureMap);
+ 
+diff --git a/third_party/gForceSDKCXX/src/wrapper.cpp b/third_party/gForceSDKCXX/src/wrapper.cpp
+index 4bc1cab7..362ba52c 100644
+--- a/third_party/gForceSDKCXX/src/wrapper.cpp
++++ b/third_party/gForceSDKCXX/src/wrapper.cpp
+@@ -88,6 +88,7 @@ int initialize (void *param)
+         tReadThread.join ();
+         pHub->unRegisterListener (listener);
+         pHub->deinit ();
++        pHub = NULL;
+     }
+     return iExitCode;
+ }
+@@ -124,9 +125,16 @@ int release (void *param)
+     }
+     bShouldStopStream = true;
+     bShouldStopThread = true;
+-    tReadThread.join ();
+-    pHub->unRegisterListener (listener);
+-    pHub->deinit ();
++    if (pHub)
++    {
++        pHub->unRegisterListener (listener);
++        if (tReadThread.joinable ())
++        {
++            tReadThread.join ();
++        }
++        pHub->deinit ();
++        pHub = NULL;
++    }
+     bInitialized = false;
+     spinLock.lock ();
+     dataQueue.clear ();
